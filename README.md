@@ -12,7 +12,7 @@ The script I've created contains four main components:
 1. Exploratory Data Analysis (EDA)
 The perform_eda() function will:
 
-Show basic statistics about your dataset
+Show basic statistics about dataset
 Analyze missing values
 Examine the distribution of betting outcomes
 Create visualizations including:
