@@ -154,7 +154,7 @@ def perform_eda(df):
     
     return df
 
-def preprocess_data(df, target_col='this_team_covered', test_size=0.2):
+def preprocess_data(df, target_col, test_size=0.2):
     """
     Preprocess the NFL betting dataset for modeling with improved techniques
     
@@ -202,7 +202,7 @@ def preprocess_data(df, target_col='this_team_covered', test_size=0.2):
     # 3. Select relevant pre-game features
     important_features = [
         'spread', 'overOdds', 'underOdds', 'totalLine', 'moneyLineOdds', 'spreadOdds',
-        'is_home', 'is_away'
+        'is_home', 'is_away','api_team_id'
     ]
     
     movement_features = [
@@ -275,8 +275,6 @@ def preprocess_data(df, target_col='this_team_covered', test_size=0.2):
     print(y_test.value_counts(normalize=True))
     
     return X_train, X_test, y_train, y_test, selected_features
-
-
 
 # --- Individual Model Building Functions ---
 
@@ -1242,7 +1240,7 @@ def build_models(X_train, X_test, y_train, y_test, features, cv=5, tune_hyperpar
     
     return strategy_df, optimal_threshold
     '''
-def analyze_betting_strategiesMl(X_test, y_test, best_model, thresholds=[0.5,0.55,0.6,0.65,0.7,0.75]):
+'''def analyze_betting_strategiesMl(X_test, y_test, best_model, thresholds=[0.5,0.55,0.6,0.65,0.7,0.75]):
     """
     Analyze profitable betting strategies based on model predictions
     using the true money-line odds per game.
@@ -1266,6 +1264,11 @@ def analyze_betting_strategiesMl(X_test, y_test, best_model, thresholds=[0.5,0.5
     results = []
     for thresh in thresholds:
         bets = strategy_df.loc[strategy_df['predicted_prob'] >= thresh].copy()
+
+## maybe thinking abiyt adding something to visualoize what bets the model is actually making, 
+
+    #considering a spread model fore lines < -125
+
         n_bets = len(bets)
         if n_bets == 0:
             continue
@@ -1315,12 +1318,6 @@ def analyze_betting_strategiesMl(X_test, y_test, best_model, thresholds=[0.5,0.5
     best_thresh = best_row['Threshold']
     print(f"\n→ Optimal Threshold: {best_thresh} (ROI: {best_row['ROI (%)']:.1f}%, Win Rate: {best_row['Win Rate (%)']:.1f}%)")
 
-    '''# Kelly sizing
-    p = best_row['Win Rate (%)'] / 100
-    b = best_row['ROI (%)'] / 100 / (1 - p)  # roughly the odds factor
-    # or directly use average payout on wins: b = bets['payout_mult'].mean()
-    kelly = (b*p - (1-p)) / b
-    print(f"Kelly fraction: {kelly:.3f} of bankroll (full), {kelly/4:.3f} (1/4 Kelly)")'''
     #2) Kelly Criterion using *actual* payout multipliers
     best_bets = strategy_df.loc[strategy_df['predicted_prob'] >= best_thresh].copy()
     p = best_bets['actual_outcome'].mean()             # empirical win prob
@@ -1345,17 +1342,7 @@ def analyze_betting_strategiesMl(X_test, y_test, best_model, thresholds=[0.5,0.5
     print(f"Expected win rate: {optimal_threshold_row['Win Rate (%)']}%")
     print(f"Expected ROI: {optimal_threshold_row['ROI (%)']}%")
     
-    '''# 3. Kelly Criterion for optimal bet sizing
-    win_prob = optimal_threshold_row['Win Rate (%)'] / 100
-    odds = 10/11  # -110 odds payout ratio
-    
-    # Kelly formula: f* = (bp - q) / b where b = odds, p = win probability, q = loss probability
-    kelly_fraction = (win_prob * odds - (1 - win_prob)) / odds
-    
-    print(f"\n3. Kelly Criterion Bet Sizing:")
-    print(f"Full Kelly: {kelly_fraction:.4f} (bet {kelly_fraction*100:.2f}% of bankroll)")
-    print(f"Quarter Kelly (recommended): {kelly_fraction/4:.4f} (bet {kelly_fraction*25:.2f}% of bankroll)")
-    '''
+
     # 3. Kelly Criterion for optimal bet sizing
     best_bets = strategy_df.loc[strategy_df['predicted_prob'] >= optimal_threshold].copy()
 
@@ -1382,7 +1369,597 @@ def analyze_betting_strategiesMl(X_test, y_test, best_model, thresholds=[0.5,0.5
     print(f"- Use fractional Kelly sizing: {kelly_fraction/4:.4f} of bankroll per bet")
     print(f"- Expected ROI: {optimal_threshold_row['ROI (%)']}%")
 
+    return strategy_df, threshold_df, best_thresh'''
+def analyze_betting_strategiesMl(X_test, y_test, best_model, thresholds=[0.5,0.55,0.6,0.65,0.7,0.75], show_detailed_bets=True):
+    """
+    Analyze profitable betting strategies based on model predictions
+    using the true money-line odds per game.
+    """
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    import numpy as np
+    import seaborn as sns
+
+    # helper to turn American ML odds into units won per 1 unit risk
+    def payout_multiplier(ml_odds):
+        if ml_odds > 0:
+            return ml_odds / 100.0
+        else:
+            return 100.0 / abs(ml_odds)
+
+    # 1) build a unified DataFrame
+    strategy_df = X_test.copy()
+    strategy_df['actual_outcome'] = y_test
+    strategy_df['predicted_prob'] = best_model.predict_proba(X_test)[:,1]
+    strategy_df['payout_mult'] = strategy_df['moneyLineOdds'].apply(payout_multiplier)
+
+    # Add a column to classify if it's a favorite or underdog
+    strategy_df['is_favorite'] = strategy_df['moneyLineOdds'] < 0
+    
+    # Add detailed print of moneyline odds range to help with debugging
+    print(f"MoneyLine Odds range: Min={strategy_df['moneyLineOdds'].min()}, Max={strategy_df['moneyLineOdds'].max()}")
+    
+    try:
+        strategy_df['odds_category'] = pd.cut(
+            strategy_df['moneyLineOdds'], 
+            bins=[-10000, -300, -200, -150, -110, 0, 110, 150, 200, 300, 10000],
+            labels=['Heavy Fav (-300+)', 'Strong Fav (-300 to -200)', 'Moderate Fav (-200 to -150)', 
+                    'Slight Fav (-150 to -110)', 'Pick\'em', 'Slight Dog (+100 to +110)', 
+                    'Moderate Dog (+110 to +150)', 'Strong Dog (+150 to +200)', 
+                    'Heavy Dog (+200 to +300)', 'Extreme Dog (+300+)']
+        )
+    except Exception as e:
+        print(f"Warning: Could not categorize odds: {str(e)}")
+        # Create a simpler version as fallback
+        try:
+            strategy_df['odds_category'] = np.where(strategy_df['moneyLineOdds'] < -200, 'Heavy Favorite',
+                                         np.where(strategy_df['moneyLineOdds'] < 0, 'Favorite',
+                                         np.where(strategy_df['moneyLineOdds'] < 200, 'Underdog', 'Heavy Underdog')))
+        except Exception as e2:
+            print(f"Warning: Could not create simple odds categories either: {str(e2)}")
+            # We'll proceed without the odds_category column
+
+    results = []
+    odds_distributions = {}
+    
+    for thresh in thresholds:
+        bets = strategy_df.loc[strategy_df['predicted_prob'] >= thresh].copy()
+        
+        n_bets = len(bets)
+        if n_bets == 0:
+            continue
+
+        # Store odds distribution data for this threshold
+        odds_dist = {
+            'moneyline_odds': bets['moneyLineOdds'].values,
+            'fav_pct': (bets['is_favorite'].mean() * 100),
+            'dog_pct': ((~bets['is_favorite']).mean() * 100),
+            'avg_odds': bets['moneyLineOdds'].mean(),
+            'median_odds': bets['moneyLineOdds'].median()
+        }
+        
+        # Only add odds_category if it exists in the DataFrame
+        if 'odds_category' in bets.columns:
+            try:
+                odds_dist['odds_category_counts'] = bets['odds_category'].value_counts().to_dict()
+            except Exception as e:
+                print(f"Warning: Could not count odds categories for threshold {thresh}: {str(e)}")
+                odds_dist['odds_category_counts'] = {}
+        
+        odds_distributions[thresh] = odds_dist
+
+        # compute win/loss per bet
+        bets['profit'] = bets.apply(
+            lambda r: r['payout_mult'] if r['actual_outcome']==1 else -1.0,
+            axis=1
+        )
+        total_profit = bets['profit'].sum()
+        total_staked = n_bets * 1.0  # 1 unit per bet
+        roi = total_profit / total_staked * 100
+
+        win_rate   = bets['actual_outcome'].mean() * 100
+        accuracy   = (bets['actual_outcome'] == (bets['predicted_prob']>=thresh)).mean() * 100
+        coverage   = n_bets / len(strategy_df) * 100
+
+        results.append({
+            'Threshold':      thresh,
+            'Bets Made':      n_bets,
+            'Coverage (%)':   coverage,
+            'Win Rate (%)':   win_rate,
+            'Accuracy (%)':   accuracy,
+            'Profit (units)': total_profit,
+            'ROI (%)':        roi,
+            'Avg ML Odds':    odds_distributions[thresh]['avg_odds'],
+            'Median ML Odds': odds_distributions[thresh]['median_odds'],
+            'Favs (%)':       odds_distributions[thresh]['fav_pct'],
+            'Dogs (%)':       odds_distributions[thresh]['dog_pct']
+        })
+
+    threshold_df = pd.DataFrame(results)
+    print("\nPerformance at Different Probability Thresholds:")
+    print(threshold_df)
+
+    # Print detailed odds distribution for each threshold
+    print("\nDetailed Moneyline Odds Distribution by Threshold:")
+    for thresh, dist_data in odds_distributions.items():
+        print(f"\nThreshold: {thresh}")
+        print(f"Average ML Odds: {dist_data['avg_odds']:.1f}")
+        print(f"Median ML Odds: {dist_data['median_odds']:.1f}")
+        print(f"Favorites: {dist_data['fav_pct']:.1f}%, Underdogs: {dist_data['dog_pct']:.1f}%")
+        
+        # Print individual moneyline odds for each bet at this threshold
+        bets = strategy_df.loc[strategy_df['predicted_prob'] >= thresh].copy()
+        print(f"All moneyline odds for {len(bets)} bets at threshold {thresh}:")
+        odds_list = bets['moneyLineOdds'].sort_values().tolist()
+        # Print in groups of 10 for readability
+        for i in range(0, len(odds_list), 10):
+            group = odds_list[i:i+10]
+            print(f"  {group}")
+        
+        # Print odds category breakdown if available
+        if 'odds_category_counts' in dist_data and dist_data['odds_category_counts']:
+            try:
+                print("Odds Category Breakdown:")
+                total_bets = sum(dist_data['odds_category_counts'].values())
+                if total_bets > 0:
+                    for category, count in sorted(dist_data['odds_category_counts'].items(), 
+                                              key=lambda x: str(x[0]) if isinstance(x[0], str) else x[0]):
+                        pct = (count / total_bets) * 100
+                        print(f"  {category}: {count} bets ({pct:.1f}%)")
+            except Exception as e:
+                print(f"  Warning: Could not print odds category breakdown: {str(e)}")
+
+    # visualize odds distribution for best threshold
+    best_row = threshold_df.loc[threshold_df['ROI (%)'].idxmax()]
+    best_thresh = best_row['Threshold']
+    
+    # Visualize ROI vs Threshold
+    plt.figure(figsize=(10,5))
+    plt.plot(threshold_df['Threshold'], threshold_df['ROI (%)'], marker='o', label='ROI (%)')
+    plt.plot(threshold_df['Threshold'], threshold_df['Win Rate (%)'], marker='s', label='Win Rate (%)')
+    plt.xlabel('Probability Threshold')
+    plt.title('Moneyline Bet: Win Rate vs ROI by Threshold')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig('ml_threshold_performance.png')
+    
+    # Create histogram of moneyline odds for best threshold
+    best_bets = strategy_df.loc[strategy_df['predicted_prob'] >= best_thresh].copy()
+    try:
+        if len(best_bets) > 0:
+            plt.figure(figsize=(12, 6))
+            plt.hist(best_bets['moneyLineOdds'], bins=20, alpha=0.7, color='blue')
+            plt.axvline(x=0, color='red', linestyle='--')
+            plt.xlabel('Moneyline Odds')
+            plt.ylabel('Number of Bets')
+            plt.title(f'Distribution of Moneyline Odds (Threshold = {best_thresh})')
+            plt.grid(True, alpha=0.3)
+            
+            # Add text showing summary statistics
+            stats_text = (f"Total Bets: {len(best_bets)}\n"
+                          f"Avg Odds: {best_bets['moneyLineOdds'].mean():.1f}\n"
+                          f"Median Odds: {best_bets['moneyLineOdds'].median():.1f}\n"
+                          f"Favorites: {best_bets['is_favorite'].mean()*100:.1f}%\n"
+                          f"Underdogs: {(~best_bets['is_favorite']).mean()*100:.1f}%")
+            plt.annotate(stats_text, xy=(0.05, 0.95), xycoords='axes fraction',
+                        va='top', ha='left', bbox=dict(boxstyle='round', fc='white', alpha=0.7))
+            
+            plt.savefig('best_threshold_odds_distribution.png')
+        else:
+            print("Warning: No bets at best threshold, cannot create histogram")
+    except Exception as e:
+        print(f"Warning: Could not create histogram: {str(e)}")
+        import traceback
+        traceback.print_exc()
+    
+    # Create a boxplot of moneyline odds for each threshold
+    try:
+        plt.figure(figsize=(14, 7))
+        boxplot_data = []
+        boxplot_labels = []
+        
+        for thresh in thresholds:
+            if thresh in odds_distributions and len(odds_distributions[thresh]['moneyline_odds']) > 0:
+                boxplot_data.append(odds_distributions[thresh]['moneyline_odds'])
+                boxplot_labels.append(f"{thresh}")
+        
+        if boxplot_data:  # Only plot if we have data
+            plt.boxplot(boxplot_data, labels=boxplot_labels)
+            plt.axhline(y=0, color='red', linestyle='--')
+            plt.xlabel('Threshold')
+            plt.ylabel('Moneyline Odds')
+            plt.title('Distribution of Moneyline Odds by Threshold')
+            plt.grid(True, alpha=0.3)
+            plt.savefig('threshold_odds_boxplot.png')
+        else:
+            print("Warning: Not enough data to create boxplot of odds by threshold")
+    except Exception as e:
+        print(f"Warning: Could not create boxplot: {str(e)}")
+        import traceback
+        traceback.print_exc()
+    
+            # Visualize Win Rate by Odds Category for best threshold
+    try:
+        if len(best_bets) > 0 and 'odds_category' in best_bets.columns:
+            plt.figure(figsize=(14, 7))
+            
+            # Make sure we have valid data to group by
+            if not best_bets['odds_category'].isna().all():
+                win_rates = best_bets.groupby('odds_category')['actual_outcome'].mean() * 100
+                counts = best_bets['odds_category'].value_counts()
+                
+                # Check if we have valid results
+                if not win_rates.empty and not counts.empty:
+                    # Create a DataFrame with the data
+                    win_rate_df = pd.DataFrame({
+                        'Win Rate (%)': win_rates,
+                        'Count': counts
+                    })
+                    # Ensure index name is preserved during reset
+                    win_rate_df = win_rate_df.reset_index()
+                    
+                    # Sort by index name which should now be a column
+                    if 'index' in win_rate_df.columns:
+                        win_rate_df = win_rate_df.sort_values('index')
+                        x_col = 'index'
+                    elif 'odds_category' in win_rate_df.columns:
+                        win_rate_df = win_rate_df.sort_values('odds_category')
+                        x_col = 'odds_category'
+                    else:
+                        # If we can't find a proper column to sort by, just use the first column
+                        x_col = win_rate_df.columns[0]
+                    
+                    ax = sns.barplot(x=x_col, y='Win Rate (%)', data=win_rate_df, palette='viridis')
+                    plt.xticks(rotation=45, ha='right')
+                    plt.title(f'Win Rate by Odds Category (Threshold = {best_thresh})')
+                    plt.grid(True, axis='y', alpha=0.3)
+                    plt.tight_layout()
+                    
+                    # Add count labels on top of bars
+                    for i, p in enumerate(ax.patches):
+                        if i < len(win_rate_df):
+                            ax.annotate(f"n={win_rate_df.iloc[i]['Count']}", 
+                                        (p.get_x() + p.get_width() / 2., p.get_height()), 
+                                        ha = 'center', va = 'bottom',
+                                        xytext = (0, 5), textcoords = 'offset points')
+                    
+                    plt.savefig('win_rate_by_odds_category.png')
+                else:
+                    print("Warning: Not enough data to visualize win rates by odds category")
+            else:
+                print("Warning: All odds_category values are NA")
+        else:
+            print("Warning: No bets at best threshold or odds_category column missing")
+    except Exception as e:
+        print(f"Warning: Could not create win rate by odds category chart: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
+    # find the best ROI threshold
+    print(f"\n→ Optimal Threshold: {best_thresh} (ROI: {best_row['ROI (%)']:.1f}%, Win Rate: {best_row['Win Rate (%)']:.1f}%)")
+    print(f"  Avg ML Odds: {best_row['Avg ML Odds']:.1f}, Favorites: {best_row['Favs (%)']:.1f}%, Underdogs: {best_row['Dogs (%)']:.1f}%")
+
+    #2) Kelly Criterion using *actual* payout multipliers
+    p = best_bets['actual_outcome'].mean()             # empirical win prob
+    average_b = best_bets['payout_mult'].mean()        # average $ won per $1 risked
+
+    # Kelly formula: f* = (b·p – q) / b
+    kelly_fraction = (average_b * p - (1 - p)) / average_b
+
+    print(f"\nKelly Criterion Bet Sizing (using true ML odds):")
+    print(f"- Empirical p: {p:.3f}, avg payout b: {average_b:.3f}")
+    print(f"- Full Kelly fraction: {kelly_fraction:.3f} of bankroll")
+    print(f"- 1/4 Kelly fraction: {kelly_fraction/4:.3f} of bankroll")
+
+    # 2. Bankroll simulation
+    print("\n2. Bankroll Simulation with Optimal Threshold:")
+    # Find optimal threshold from our analysis
+    optimal_threshold_row = threshold_df.iloc[threshold_df['ROI (%)'].argmax()]
+    optimal_threshold = optimal_threshold_row['Threshold']
+    
+    print(f"Optimal threshold: {optimal_threshold}")
+    print(f"Expected win rate: {optimal_threshold_row['Win Rate (%)']}%")
+    print(f"Expected ROI: {optimal_threshold_row['ROI (%)']}%")
+    
+    # 3. Kelly Criterion for optimal bet sizing
+    best_bets = strategy_df.loc[strategy_df['predicted_prob'] >= optimal_threshold].copy()
+
+    # empirical win probability
+    p = best_bets['actual_outcome'].mean()
+
+    # true average payout per $1 risked
+    b = best_bets['payout_mult'].mean()
+
+    # Kelly formula: f* = (b*p - q) / b, where q = 1 - p
+    kelly_fraction = (b * p - (1 - p)) / b
+
+    # 4. Recommended betting strategy
+    print(f"\n3. Kelly Criterion Bet Sizing (using true ML odds):")
+    print(f"- Empirical win prob p: {p:.3f}")
+    print(f"- Avg payout multiplier b: {b:.3f}")
+    print(f"- Full Kelly fraction: {kelly_fraction:.3f} of bankroll")
+    print(f"- 1/4 Kelly fraction: {kelly_fraction/4:.3f} of bankroll")
+    
+    print("\n4. Recommended Betting Strategy:")
+    print(f"- Only bet when model probability >= {optimal_threshold}")
+    print(f"- Expected to bet on approximately {optimal_threshold_row['Coverage (%)']}% of games")
+    print(f"- Use fractional Kelly sizing: {kelly_fraction/4:.4f} of bankroll per bet")
+    print(f"- Expected ROI: {optimal_threshold_row['ROI (%)']}%")
+
+    
+    # 5. Bankroll simulation with different betting strategies
+    try:
+        print("\n5. BANKROLL SIMULATION")
+        
+        # Simulate with quarter Kelly betting
+        print("\n5.1 Quarter Kelly Betting Strategy:")
+        kelly_results = simulate_bankroll(strategy_df, best_thresh, 
+                                          initial_bankroll=1000, 
+                                          kelly_fraction=0.25)
+        
+        # Simulate with flat betting (1% of initial bankroll)
+        print("\n5.2 Flat Betting Strategy (1% of initial bankroll):")
+        flat_results = simulate_bankroll(strategy_df, best_thresh, 
+                                         initial_bankroll=1000, 
+                                         flat_bet=10)  # $10 = 1% of $1000
+        
+        # Simulate with flat betting (5% of initial bankroll)
+        print("\n5.3 Flat Betting Strategy (5% of initial bankroll):")
+        flat_results_5pct = simulate_bankroll(strategy_df, best_thresh, 
+                                             initial_bankroll=1000, 
+                                             flat_bet=50)  # $50 = 5% of $1000
+    except ImportError:
+        print("Note: Could not import simulate_bankroll function")
+    except Exception as e:
+        print(f"Warning: Could not run bankroll simulation: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
     return strategy_df, threshold_df, best_thresh
+
+def show_bets_at_threshold(strategy_df, threshold, limit=None):
+    """
+    Display all bets made at a specific threshold with their moneyline odds and outcomes.
+    
+    Parameters:
+    strategy_df: DataFrame with betting strategy data
+    threshold: The probability threshold to filter bets
+    limit: Optional limit on number of bets to show (None shows all)
+    """
+    # Select bets at the specified threshold
+    bets = strategy_df.loc[strategy_df['predicted_prob'] >= threshold].copy()
+    
+    if len(bets) == 0:
+        print(f"No bets found at threshold {threshold}")
+        return
+    
+    # Create a view with the essential columns
+    bet_view = bets[['moneyLineOdds', 'predicted_prob', 'actual_outcome', 'payout_mult']].copy()
+    
+    # Add a profit column
+    bet_view['profit'] = bet_view.apply(
+        lambda r: r['payout_mult'] if r['actual_outcome']==1 else -1.0,
+        axis=1
+    )
+    
+    # Sort by predicted probability (descending)
+    bet_view = bet_view.sort_values('predicted_prob', ascending=False)
+    
+    # Add favorite/underdog classification
+    bet_view['is_favorite'] = bet_view['moneyLineOdds'] < 0
+    bet_view['fav_dog'] = bet_view['is_favorite'].apply(lambda x: 'Favorite' if x else 'Underdog')
+    
+    # Calculate summary statistics
+    total_bets = len(bet_view)
+    fav_count = bet_view['is_favorite'].sum()
+    dog_count = total_bets - fav_count
+    fav_pct = fav_count / total_bets * 100
+    dog_pct = dog_count / total_bets * 100
+    
+    avg_odds = bet_view['moneyLineOdds'].mean()
+    median_odds = bet_view['moneyLineOdds'].median()
+    
+    win_count = bet_view['actual_outcome'].sum()
+    win_rate = win_count / total_bets * 100
+    
+    total_profit = bet_view['profit'].sum()
+    roi = total_profit / total_bets * 100
+    
+    # Print summary statistics
+    print(f"\nBets at threshold {threshold}:")
+    print(f"Total bets: {total_bets}")
+    print(f"Favorites: {fav_count} ({fav_pct:.1f}%), Underdogs: {dog_count} ({dog_pct:.1f}%)")
+    print(f"Average ML Odds: {avg_odds:.1f}, Median ML Odds: {median_odds:.1f}")
+    print(f"Win rate: {win_rate:.1f}% ({win_count}/{total_bets})")
+    print(f"Total profit: {total_profit:.2f} units, ROI: {roi:.1f}%")
+    
+    # Show detailed bets (limit if specified)
+    if limit is not None:
+        bet_view = bet_view.head(limit)
+        
+    # Add the index as a bet number
+    bet_view = bet_view.reset_index(drop=True)
+    bet_view.index = bet_view.index + 1  # Start from bet #1 instead of 0
+    
+    # Move the fav_dog column near the front for better readability
+    cols = list(bet_view.columns)
+    cols.remove('fav_dog')
+    cols.insert(1, 'fav_dog')  # Insert after moneyLineOdds
+    bet_view = bet_view[cols]
+    
+    # Print the detailed bets
+    print("\nDetailed bets:")
+    pd.set_option('display.max_rows', None)  # Ensure all rows are displayed
+    print(bet_view)
+    
+    # Additional stats on winning/losing for favorites and underdogs
+    fav_bets = bet_view[bet_view['is_favorite']]
+    dog_bets = bet_view[~bet_view['is_favorite']]
+    
+    if len(fav_bets) > 0:
+        fav_win_rate = fav_bets['actual_outcome'].mean() * 100
+        fav_profit = fav_bets['profit'].sum()
+        fav_roi = fav_profit / len(fav_bets) * 100
+        print(f"\nFavorites win rate: {fav_win_rate:.1f}%, ROI: {fav_roi:.1f}%")
+    
+    if len(dog_bets) > 0:
+        dog_win_rate = dog_bets['actual_outcome'].mean() * 100
+        dog_profit = dog_bets['profit'].sum()
+        dog_roi = dog_profit / len(dog_bets) * 100
+        print(f"Underdogs win rate: {dog_win_rate:.1f}%, ROI: {dog_roi:.1f}%")
+        
+    return bet_view
+def simulate_bankroll(strategy_df, threshold, initial_bankroll=1000, kelly_fraction=0.25, flat_bet=None):
+    """
+    Simulate bankroll growth using either Kelly criterion or flat betting
+    
+    Parameters:
+    strategy_df: DataFrame with betting strategy data
+    threshold: The probability threshold to filter bets
+    initial_bankroll: Starting bankroll (default $1,000)
+    kelly_fraction: Fraction of Kelly to use (default 0.25 = quarter Kelly)
+    flat_bet: If provided, use flat betting of this amount instead of Kelly
+    
+    Returns:
+    DataFrame with bankroll history and bet details
+    """
+    import pandas as pd
+    import numpy as np
+    import matplotlib.pyplot as plt
+    
+    # Select bets at the specified threshold
+    bets = strategy_df.loc[strategy_df['predicted_prob'] >= threshold].copy()
+    
+    if len(bets) == 0:
+        print(f"No bets found at threshold {threshold}")
+        return None
+    
+    # Sort chronologically (assuming the dataframe is already in chronological order)
+    # If you have a date/game ID column, you would sort by that here
+    
+    # Create a results dataframe to track bankroll changes
+    results = []
+    current_bankroll = initial_bankroll
+    
+    # For each bet
+    for i, bet in bets.iterrows():
+        # Calculate bet size
+        if flat_bet is not None:
+            # Flat betting
+            bet_size = min(flat_bet, current_bankroll)
+        else:
+            # Kelly betting
+            p = bet['predicted_prob']  # Model's estimated probability
+            b = bet['payout_mult']     # Potential profit per $1 wagered
+            
+            # Kelly formula: f* = (b*p - (1-p)) / b
+            full_kelly = (b * p - (1 - p)) / b
+            
+            # Apply fractional Kelly and ensure we don't bet more than we have
+            bet_size = min(current_bankroll, current_bankroll * max(0, full_kelly * kelly_fraction))
+            
+            # Round to nearest $1 for simplicity
+            bet_size = round(bet_size)
+        
+        # Record pre-bet info
+        bet_info = {
+            'bankroll_before': current_bankroll,
+            'bet_size': bet_size,
+            'moneyline_odds': bet['moneyLineOdds'],
+            'predicted_prob': bet['predicted_prob'],
+            'is_favorite': bet['moneyLineOdds'] < 0
+        }
+        
+        # Calculate outcome
+        won = bet['actual_outcome'] == 1
+        
+        if won:
+            profit = bet_size * bet['payout_mult']
+            current_bankroll += profit
+            bet_info['outcome'] = 'win'
+            bet_info['profit'] = profit
+        else:
+            current_bankroll -= bet_size
+            bet_info['outcome'] = 'loss'
+            bet_info['profit'] = -bet_size
+            
+        bet_info['bankroll_after'] = current_bankroll
+        
+        # Store the results
+        results.append(bet_info)
+        
+        # Check if bankroll is depleted
+        if current_bankroll <= 0:
+            print("Warning: Bankroll depleted before all bets were placed")
+            break
+    
+    # Convert results to DataFrame
+    bankroll_df = pd.DataFrame(results)
+    
+    # Calculate cumulative stats
+    bankroll_df['bet_number'] = range(1, len(bankroll_df) + 1)
+    bankroll_df['cumulative_profit'] = bankroll_df['profit'].cumsum()
+    bankroll_df['roi'] = (bankroll_df['cumulative_profit'] / 
+                         (bankroll_df['bet_number'] * bankroll_df['bet_size'].mean())) * 100
+    
+    # Overall statistics
+    total_bets = len(bankroll_df)
+    wins = (bankroll_df['outcome'] == 'win').sum()
+    losses = total_bets - wins
+    win_rate = wins / total_bets * 100
+    final_bankroll = bankroll_df['bankroll_after'].iloc[-1]
+    total_profit = final_bankroll - initial_bankroll
+    roi = (total_profit / initial_bankroll) * 100
+    
+    # Report results
+    print(f"\n=== BANKROLL SIMULATION RESULTS ===")
+    print(f"Initial bankroll: ${initial_bankroll}")
+    print(f"Betting strategy: {'Flat ${:.2f} per bet'.format(flat_bet) if flat_bet else f'{kelly_fraction:.2f} Kelly'}")
+    print(f"Total bets: {total_bets}")
+    print(f"Win rate: {win_rate:.1f}% ({wins} wins, {losses} losses)")
+    print(f"Final bankroll: ${final_bankroll:.2f}")
+    print(f"Total profit: ${total_profit:.2f}")
+    print(f"ROI: {roi:.1f}%")
+    
+    # Visualize bankroll over time
+    plt.figure(figsize=(12, 6))
+    plt.plot(bankroll_df['bet_number'], bankroll_df['bankroll_after'], marker='o', linewidth=2)
+    plt.axhline(y=initial_bankroll, color='r', linestyle='--', label=f'Initial ${initial_bankroll}')
+    plt.xlabel('Bet Number')
+    plt.ylabel('Bankroll ($)')
+    plt.title('Bankroll Progression')
+    plt.grid(True, alpha=0.3)
+    
+    # Add annotations for big wins/losses
+    big_swings = bankroll_df[abs(bankroll_df['profit']) > bankroll_df['profit'].std() * 2]
+    for i, swing in big_swings.iterrows():
+        plt.annotate(f"${swing['profit']:.0f}",
+                    (swing['bet_number'], swing['bankroll_after']),
+                    xytext=(0, 10 if swing['profit'] > 0 else -20),
+                    textcoords='offset points',
+                    ha='center')
+    
+    plt.savefig('bankroll_simulation.png')
+    plt.tight_layout()
+    
+    # Separate analysis for favorites vs underdogs
+    if len(bankroll_df) > 0:
+        fav_bets = bankroll_df[bankroll_df['is_favorite']]
+        dog_bets = bankroll_df[~bankroll_df['is_favorite']]
+        
+        print("\nPerformance by odds type:")
+        if len(fav_bets) > 0:
+            fav_win_rate = (fav_bets['outcome'] == 'win').mean() * 100
+            fav_profit = fav_bets['profit'].sum()
+            print(f"Favorites: {len(fav_bets)} bets, {fav_win_rate:.1f}% win rate, ${fav_profit:.2f} profit")
+        
+        if len(dog_bets) > 0:
+            dog_win_rate = (dog_bets['outcome'] == 'win').mean() * 100
+            dog_profit = dog_bets['profit'].sum()
+            print(f"Underdogs: {len(dog_bets)} bets, {dog_win_rate:.1f}% win rate, ${dog_profit:.2f} profit")
+    
+    return bankroll_df
 
 def main():
     """
@@ -1394,7 +1971,7 @@ def main():
         print(f"Successfully loaded dataset with {df.shape[0]} rows and {df.shape[1]} columns")
         
         # Perform EDA
-        df = perform_eda(df)
+        #df = perform_eda(df)
         
         # Preprocess data
         #X_train, X_test, y_train, y_test, features = preprocess_data(df, target_col='this_team_covered')
@@ -1418,6 +1995,32 @@ def main():
             X_test, y_test, best_model
         )
         
+
+        # 4. Show more detailed analysis for the best threshold
+        print("\n=== ADDITIONAL ANALYSIS FOR BEST THRESHOLD ===")
+        show_bets_at_threshold(strategy_df, best_thresh)
+        
+        # 5. Run bankroll simulation
+        print("\n=== BANKROLL SIMULATION WITH $1,000 STARTING BANKROLL ===")
+        # Quarter Kelly
+        kelly_results = simulate_bankroll(
+            strategy_df, best_thresh, 
+            initial_bankroll=1000, 
+            kelly_fraction=0.25
+        )
+        
+        # Flat betting 1% and 5% of bankroll
+        flat_results_1pct = simulate_bankroll(
+            strategy_df, best_thresh, 
+            initial_bankroll=1000, 
+            flat_bet=10
+        )
+        
+        flat_results_5pct = simulate_bankroll(
+            strategy_df, best_thresh, 
+            initial_bankroll=1000, 
+            flat_bet=50
+        )
         print("\nAnalysis complete! Check the visualizations and results.")
         
         return best_model, strategy_df
